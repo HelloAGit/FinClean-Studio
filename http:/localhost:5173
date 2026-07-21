@@ -1,0 +1,71 @@
+
+---
+
+### `backend/app.py` (FastAPI entrypoint)
+
+```python
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
+
+from profiler import profile_dataset
+from rules_engine import apply_rules, RuleTemplate
+from corrections import generate_corrections, CorrectionDecisionRequest
+from export import export_job
+from storage.files import save_source_file, load_dataset
+from models import DatasetType
+
+app = FastAPI(title="FinClean Studio API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/upload")
+async def upload_dataset(
+    file: UploadFile = File(...),
+    dataset_type: DatasetType = Form(...)
+):
+    path = save_source_file(file)
+    df = load_dataset(path)
+    profile = profile_dataset(df)
+    return {
+        "dataset_id": profile.dataset_id,
+        "dataset_type": dataset_type,
+        "profile": profile.dict(),
+    }
+
+@app.post("/rules/templates")
+async def save_rules_template(template: RuleTemplate):
+    # MVP: store in memory or simple JSON file
+    template.save()
+    return {"status": "saved", "template_name": template.name}
+
+@app.post("/rules/apply/{dataset_id}")
+async def run_rules(dataset_id: str, template_name: str):
+    df = load_dataset(dataset_id)
+    rule_template = RuleTemplate.load(template_name)
+    rule_results = apply_rules(df, rule_template)
+    corrections = generate_corrections(df, rule_results)
+    return {
+        "dataset_id": dataset_id,
+        "rules": rule_results,
+        "corrections": [c.dict() for c in corrections],
+    }
+
+@app.post("/corrections/decide/{dataset_id}")
+async def decide_corrections(dataset_id: str, decisions: List[CorrectionDecisionRequest]):
+    # Apply decisions, record audit trail, create cleaned version
+    from corrections import apply_decisions
+    cleaned_df, audit_log = apply_decisions(dataset_id, decisions)
+    job = export_job(dataset_id, cleaned_df, audit_log)
+    return job
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    # Return links/paths to export artefacts
+    from export import get_job_summary
+    return get_job_summary(job_id)
